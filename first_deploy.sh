@@ -137,7 +137,7 @@ configure_github_token() {
     log_info "检查GitHub Token配置..."
     
     local env_file="${DEPLOY_DIR}/.env"
-    local github_tokens=$(grep "^GITHUB_TOKENS="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"$env_file" 2>/dev/null | cut -d'=' -f2- | tr -d '"' | tr -d "'" || echo "")
+    local github_tokens=$(grep "^GITHUB_TOKENS=" "$env_file" 2>/dev/null | cut -d'=' -f2- | tr -d '"' | tr -d "'" || echo "")
     
     # 检查是否包含实际的token（不是示例值）
     if [[ -z "$github_tokens" ]] || [[ "$github_tokens" == "ghp_your_token_here_1,ghp_your_token_here_2" ]] || [[ "$github_tokens" =~ ghp_your_token_here ]]; then
