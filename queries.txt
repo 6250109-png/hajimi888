@@ -1,0 +1,4 @@
+"xai-" language:python
+"xai-" language:env
+"xai-" filename:.env
+"xai-" extension:json
