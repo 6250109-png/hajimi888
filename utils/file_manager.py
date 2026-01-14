@@ -55,9 +55,6 @@ class FileManager:
     def __init__(self, data_dir: str):
         """
         初始化FileManager并完成所有必要的设置
-        
-        Args:
-            data_dir: 数据目录路径
         """
         logger.info("🔧 Initializing FileManager")
 
@@ -143,9 +140,6 @@ class FileManager:
     def check(self) -> bool:
         """
         检查FileManager是否正确初始化，所有必要文件是否就绪
-        
-        Returns:
-            bool: 检查是否通过
         """
         logger.info("🔍 Checking FileManager status...")
 
@@ -243,7 +237,8 @@ class FileManager:
         try:
             with open(self.checkpoint_file, "w", encoding="utf-8") as f:
                 json.dump(checkpoint.to_dict(), f, ensure_ascii=False, indent=2)
-            checkpoint = self.load_checkpoint()
+            # 修改点：移除重复加载，避免不必要的IO
+            # checkpoint = self.load_checkpoint() 
         except Exception as e:
             logger.error(f"Failed to save {self.checkpoint_file}: {e}")
 
@@ -300,13 +295,7 @@ class FileManager:
                     f.write(f"{key}\n")
 
     def save_keys_send_result(self, keys: List[str], send_result: dict) -> None:
-        """
-        保存发送到外部应用的结果
-        
-        Args:
-            keys: API keys列表
-            send_result: 字典，key是密钥，value是发送结果状态
-        """
+        """保存发送到外部应用的结果"""
         if not keys:
             return
 
@@ -449,19 +438,20 @@ class FileManager:
     # ================================
 
     def _create_default_queries_file(self, queries_file: str) -> None:
-        """创建默认的查询文件"""
+        """【已修改】创建针对 Grok (xAI) 的默认查询文件"""
         try:
             os.makedirs(os.path.dirname(queries_file), exist_ok=True)
             with open(queries_file, "w", encoding="utf-8") as f:
-                f.write("# GitHub搜索查询配置文件\n")
+                f.write("# GitHub搜索查询配置文件 - Grok (xAI) 版\n")
                 f.write("# 每行一个查询语句，支持GitHub搜索语法\n")
                 f.write("# 以#开头的行为注释，空行会被忽略\n")
                 f.write("\n")
-                f.write("# 基础API密钥搜索\n")
-                f.write("AIzaSy in:file\n")
-                f.write("AIzaSy in:file filename:.env\n")
-                f.write("AIzaSy in:file filename:env.example\n")
-            logger.info(f"Created default queries file: {queries_file}")
+                f.write("# 针对 xAI API 密钥特征的搜索\n")
+                f.write("\"xai-\" in:file\n")
+                f.write("\"xai-\" in:file filename:.env\n")
+                f.write("\"xai-\" in:file language:python\n")
+                f.write("\"xai-\" in:file filename:config.json\n")
+            logger.info(f"✅ Created Grok default queries file: {queries_file}")
         except Exception as e:
             logger.error(f"Failed to create default queries file {queries_file}: {e}")
 
