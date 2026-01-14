@@ -26,10 +26,11 @@ class Config:
             if proxy_str:
                 PROXY_LIST.append(proxy_str)
     
-    # Gemini Balancer配置
-    GEMINI_BALANCER_SYNC_ENABLED = os.getenv("GEMINI_BALANCER_SYNC_ENABLED", "false")
-    GEMINI_BALANCER_URL = os.getenv("GEMINI_BALANCER_URL", "")
-    GEMINI_BALANCER_AUTH = os.getenv("GEMINI_BALANCER_AUTH", "")
+    # Grok / xAI Balancer 配置 (原 Gemini Balancer)
+    # 如果你还需要同步到外部负载均衡器，这里保留逻辑但更名为 GROK 相关
+    GROK_BALANCER_SYNC_ENABLED = os.getenv("GROK_BALANCER_SYNC_ENABLED", "false")
+    GROK_BALANCER_URL = os.getenv("GROK_BALANCER_URL", "")
+    GROK_BALANCER_AUTH = os.getenv("GROK_BALANCER_AUTH", "")
 
     # GPT Load Balancer Configuration
     GPT_LOAD_SYNC_ENABLED = os.getenv("GPT_LOAD_SYNC_ENABLED", "false")
@@ -55,8 +56,9 @@ class Config:
     # 已扫描SHA文件配置
     SCANNED_SHAS_FILE = os.getenv("SCANNED_SHAS_FILE", "scanned_shas.txt")
 
-    # Gemini模型配置
-    HAJIMI_CHECK_MODEL = os.getenv("HAJIMI_CHECK_MODEL", "gemini-2.5-flash")
+    # 【核心修改】Grok模型配置
+    # 默认使用 grok-2-latest，这是目前 xAI 最稳定的验证模型
+    HAJIMI_CHECK_MODEL = os.getenv("HAJIMI_CHECK_MODEL", "grok-2-latest")
 
     # 文件路径黑名单配置
     FILE_PATH_BLACKLIST_STR = os.getenv("FILE_PATH_BLACKLIST", "readme,docs,doc/,.md,sample,tutorial")
@@ -64,15 +66,6 @@ class Config:
 
     @classmethod
     def parse_bool(cls, value: str) -> bool:
-        """
-        解析布尔值配置，支持多种格式
-        
-        Args:
-            value: 配置值字符串
-            
-        Returns:
-            bool: 解析后的布尔值
-        """
         if isinstance(value, bool):
             return value
         
@@ -87,16 +80,9 @@ class Config:
 
     @classmethod
     def get_random_proxy(cls) -> Optional[Dict[str, str]]:
-        """
-        随机获取一个代理配置
-        
-        Returns:
-            Optional[Dict[str, str]]: requests格式的proxies字典，如果未配置则返回None
-        """
         if not cls.PROXY_LIST:
             return None
         
-        # 随机选择一个代理
         proxy_url = random.choice(cls.PROXY_LIST).strip()
         
         # 返回requests格式的proxies字典
@@ -107,13 +93,7 @@ class Config:
 
     @classmethod
     def check(cls) -> bool:
-        """
-        检查必要的配置是否完整
-        
-        Returns:
-            bool: 配置是否完整
-        """
-        logger.info("🔍 Checking required configurations...")
+        logger.info("🔍 Checking required configurations (Grok Edition)...")
         
         errors = []
         
@@ -124,15 +104,15 @@ class Config:
         else:
             logger.info(f"✅ GitHub tokens: {len(cls.GITHUB_TOKENS)} configured")
         
-        # 检查Gemini Balancer配置
-        if cls.GEMINI_BALANCER_SYNC_ENABLED:
-            logger.info(f"✅ Gemini Balancer enabled, URL: {cls.GEMINI_BALANCER_URL}")
-            if not cls.GEMINI_BALANCER_AUTH or not cls.GEMINI_BALANCER_URL:
-                logger.warning("⚠️ Gemini Balancer Auth or URL Missing (Balancer功能将被禁用)")
+        # 检查 Grok Balancer 配置
+        if cls.parse_bool(cls.GROK_BALANCER_SYNC_ENABLED):
+            logger.info(f"✅ Grok Balancer enabled, URL: {cls.GROK_BALANCER_URL}")
+            if not cls.GROK_BALANCER_AUTH or not cls.GROK_BALANCER_URL:
+                logger.warning("⚠️ Grok Balancer Auth or URL Missing (Balancer功能将被禁用)")
             else:
-                logger.info(f"✅ Gemini Balancer Auth: ****")
+                logger.info(f"✅ Grok Balancer Auth: ****")
         else:
-            logger.info("ℹ️ Gemini Balancer URL: Not configured (Balancer功能将被禁用)")
+            logger.info("ℹ️ Grok Balancer: Not configured")
 
         # 检查GPT Load Balancer配置
         if cls.parse_bool(cls.GPT_LOAD_SYNC_ENABLED):
@@ -143,39 +123,24 @@ class Config:
                 logger.info(f"✅ GPT Load Balancer Auth: ****")
                 logger.info(f"✅ GPT Load Balancer Group Name: {cls.GPT_LOAD_GROUP_NAME}")
         else:
-            logger.info("ℹ️ GPT Load Balancer: Not configured (Load Balancer功能将被禁用)")
+            logger.info("ℹ️ GPT Load Balancer: Not configured")
 
         if errors:
             logger.error("❌ Configuration check failed:")
-            logger.info("Please check your .env file and configuration.")
             return False
         
         logger.info("✅ All required configurations are valid")
         return True
 
 
-logger.info(f"*" * 30 + " CONFIG START " + "*" * 30)
+# 启动时打印配置状态
+logger.info(f"*" * 30 + " GROK CONFIG START " + "*" * 30)
 logger.info(f"GITHUB_TOKENS: {len(Config.GITHUB_TOKENS)} tokens")
-logger.info(f"DATA_PATH: {Config.DATA_PATH}")
 logger.info(f"PROXY_LIST: {len(Config.PROXY_LIST)} proxies configured")
-logger.info(f"GEMINI_BALANCER_URL: {Config.GEMINI_BALANCER_URL or 'Not configured'}")
-logger.info(f"GEMINI_BALANCER_AUTH: {'Configured' if Config.GEMINI_BALANCER_AUTH else 'Not configured'}")
-logger.info(f"GEMINI_BALANCER_SYNC_ENABLED: {Config.parse_bool(Config.GEMINI_BALANCER_SYNC_ENABLED)}")
-logger.info(f"GPT_LOAD_SYNC_ENABLED: {Config.parse_bool(Config.GPT_LOAD_SYNC_ENABLED)}")
-logger.info(f"GPT_LOAD_URL: {Config.GPT_LOAD_URL or 'Not configured'}")
-logger.info(f"GPT_LOAD_AUTH: {'Configured' if Config.GPT_LOAD_AUTH else 'Not configured'}")
-logger.info(f"GPT_LOAD_GROUP_NAME: {Config.GPT_LOAD_GROUP_NAME or 'Not configured'}")
-logger.info(f"VALID_KEY_PREFIX: {Config.VALID_KEY_PREFIX}")
-logger.info(f"RATE_LIMITED_KEY_PREFIX: {Config.RATE_LIMITED_KEY_PREFIX}")
-logger.info(f"KEYS_SEND_PREFIX: {Config.KEYS_SEND_PREFIX}")
-logger.info(f"VALID_KEY_DETAIL_PREFIX: {Config.VALID_KEY_DETAIL_PREFIX}")
-logger.info(f"RATE_LIMITED_KEY_DETAIL_PREFIX: {Config.RATE_LIMITED_KEY_DETAIL_PREFIX}")
-logger.info(f"KEYS_SEND_DETAIL_PREFIX: {Config.KEYS_SEND_DETAIL_PREFIX}")
+logger.info(f"HAJIMI_CHECK_MODEL: {Config.HAJIMI_CHECK_MODEL}")
+logger.info(f"GROK_BALANCER_SYNC_ENABLED: {Config.parse_bool(Config.GROK_BALANCER_SYNC_ENABLED)}")
 logger.info(f"DATE_RANGE_DAYS: {Config.DATE_RANGE_DAYS} days")
 logger.info(f"QUERIES_FILE: {Config.QUERIES_FILE}")
-logger.info(f"SCANNED_SHAS_FILE: {Config.SCANNED_SHAS_FILE}")
-logger.info(f"HAJIMI_CHECK_MODEL: {Config.HAJIMI_CHECK_MODEL}")
-logger.info(f"FILE_PATH_BLACKLIST: {len(Config.FILE_PATH_BLACKLIST)} items")
 logger.info(f"*" * 30 + " CONFIG END " + "*" * 30)
 
 # 创建全局配置实例
